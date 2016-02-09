@@ -1,10 +1,18 @@
 import numpy as np
+import pandas as pd
 import scipy.ndimage.interpolation as itp
 import scipy.interpolate as interpolate
 from scipy.ndimage import map_coordinates
 from matplotlib import cm
 import matplotlib.pyplot as plt
+from matplotlib import animation
 from mpl_toolkits.mplot3d import Axes3D
+from skimage import measure
+from skimage import filters
+from skimage import feature
+from skimage.transform import hough_ellipse
+from skimage.draw import ellipse_perimeter, circle
+from skimage.morphology import disk
 
 def interp3(x, y, z, v, xi, yi, zi, **kwargs):
     """Sample a 3D array "v" with pixel corner locations at "x","y","z" at the
@@ -28,15 +36,17 @@ def interp3(x, y, z, v, xi, yi, zi, **kwargs):
 
     return output.reshape(orig_shape)
 
-def test_data_slice2():
+def get_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=65):
     data = np.memmap("E:\\guts_tracking\\brain_8bit_256x256x129.raw", dtype='uint8', shape=(129,256,256)).copy()
     #plt.imshow(data[60], cmap='gray')
     #plt.show()
     #return
 
-    phi = 0 #z
-    theta = 0 #y
-    psi = 0 #x
+    #phi = 0 #z
+    #theta = 15 #y
+    #psi = 0 #x
+
+    phi, theta, psi = phi_z, theta_y, psi_x
 
     r = np.radians([phi, theta, psi])
     dims = data.shape
@@ -45,7 +55,7 @@ def test_data_slice2():
     #p0 = np.matrix([50, round(dims[1]/2.), round(dims[2]/2.)]).T
     #p0 = np.matrix([63, round(dims[1]/2.), 1]).T
     #p0 = np.matrix([140, 100, 60]).T
-    #p0 = np.matrix([71, 129, 103]).T
+    #p0 = np.matrix([65, 115, 140]).T
     #p0 = np.matrix([0, 0, 0]).T
 
     Rz = np.matrix([[1., 0., 0., 0.], \
@@ -74,11 +84,7 @@ def test_data_slice2():
 
     #this is the transformation
     #I assume you want a volume with the same dimensions as your old volume
-    zv, yv, xv = np.meshgrid(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]))
-
-    print zv
-    print yv
-    print xv
+    zv, yv, xv = np.meshgrid(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), indexing='ij')
 
     #the coordinates you want to find a value for
     coordinates_axes_new = np.array([np.ravel(zv).T, np.ravel(yv).T, np.ravel(xv).T, np.ones(len(np.ravel(zv))).T])
@@ -95,10 +101,9 @@ def test_data_slice2():
     #plt3d = plt.figure().gca(projection='3d')
     #plt3d.plot_surface(x_coordinates, y_coordinates, y_coordinates, cmap=cm.hot)
 
-    print new_data.shape
-
-    plt.imshow(new_data[60], cmap='gray')
-    plt.show()
+    #plt.imshow(new_data[65], cmap='gray')
+    #plt.show()
+    return new_data[slice_idx]
 
 #normal order x, y, z
 def test_data_slice():
@@ -164,6 +169,277 @@ def test_data_slice():
     plt.imshow(new_data[:,:,100], cmap='gray')
     plt.show()
 
+def plot_obique_slices():
+    phi = np.linspace(-90,90,10)
+    theta = np.linspace(-90,90,10)
+    psi = np.linspace(-90,90,10)
+
+    fig, axes = plt.subplots(10, 10)
+
+    for i, theta_val in enumerate(theta):
+        #for j, psi_val in enumerate(psi):
+        for j, phi_val in enumerate(phi):
+            #axes[i,j].imshow(get_oblique_slice(theta_y=theta_val, psi_x=psi_val), cmap='gray')
+            axes[i,j].imshow(get_oblique_slice(phi_z=phi_val, theta_y=theta_val), cmap='gray')
+            axes[i,j].get_xaxis().set_visible(False)
+            axes[i,j].get_yaxis().set_visible(False)
+
+    plt.show()
+
+def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=None):
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+    #plt.imshow(data[slice_idx], cmap='gray')
+    #plt.show()
+    #return
+
+    phi, theta, psi = phi_z, theta_y, psi_x
+
+    r = np.radians([phi, theta, psi])
+    dims = data.shape
+
+    if not rot_p0:
+        rot_p0 = [round(dims[0]/2.), round(dims[1]/2.), round(dims[2]/2.)]
+
+    p0 = np.matrix(rot_p0).T #image center
+
+    Rz = np.matrix([[1., 0., 0., 0.], \
+                   [0., np.cos(r[0]), np.sin(r[0]), 0.], \
+                   [0., -np.sin(r[0]), np.cos(r[0]), 0.], \
+                   [0., 0., 0., 1.]])
+
+    Ry = np.matrix([[np.cos(r[1]), 0., -np.sin(r[1]), 0.], \
+                   [0., 1., 0., 0.], \
+                   [np.sin(r[1]), 0., np.cos(r[1]), 0.], \
+                   [0., 0., 0., 1.]])
+    Rx = np.matrix([[np.cos(r[2]), np.sin(r[2]), 0., 0.], \
+                   [-np.sin(r[2]), np.cos(r[2]), 0., 0.], \
+                   [0., 0., 1., 0.], \
+                   [0., 0., 0., 1.]])
+    R = Rz*Ry*Rx
+
+    #make affine matrix to rotate about center of image instead of origin
+    T = (np.identity(3) - R[0:3,0:3]) * p0[0:3]
+    A = R
+    A[0:3,3] = T
+
+    rot_old_to_new = A
+    rot_new_to_old = rot_old_to_new.I
+
+    #this is the transformation
+    #I assume you want a volume with the same dimensions as your old volume
+    zv, yv, xv = np.meshgrid(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), indexing='ij')
+
+    #the coordinates you want to find a value for
+    coordinates_axes_new = np.array([np.ravel(zv).T, np.ravel(yv).T, np.ravel(xv).T, np.ones(len(np.ravel(zv))).T])
+
+    #the coordinates where you can find those values
+    coordinates_axes_old = np.array(rot_new_to_old * coordinates_axes_new)
+    z_coordinates = np.reshape(coordinates_axes_old[0,:], dims)
+    y_coordinates = np.reshape(coordinates_axes_old[1,:], dims)
+    x_coordinates = np.reshape(coordinates_axes_old[2,:], dims)
+
+    #get the values for your new coordinates
+    new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates)
+
+    #plot data
+    plot_comparative(data, new_data, slice_idx=slice_idx, phi=phi, theta=theta, psi=psi)
+
+def plot_comparative(data, new_data, slice_idx=125, phi=0, theta=0, psi=0):
+    fig, axes = plt.subplots(1, 2)
+
+    axes[0].imshow(data[slice_idx], cmap='gray')
+    axes[0].set_title('Original')
+
+    axes[1].imshow(new_data[slice_idx], cmap='gray')
+    axes[1].set_title('Rz = %d, Ry = %d, Rx = %d' % (phi, theta, psi))
+
+    for ax in axes:
+        ax.get_xaxis().set_visible(False)
+        ax.get_yaxis().set_visible(False)
+
+    plt.show()
+
+def _calc_circularity(area, perimeter):
+    return 4.0 * np.pi * area / (perimeter * perimeter)
+
+def preprocess_data(data):
+    return data
+
+def segment_data(processed_data):
+    th_val = filters.threshold_otsu(processed_data)
+    thresholded_parts = processed_data <= th_val
+    return thresholded_parts
+
+def slice_stats(segmented_data):
+    properties = ['label','area','centroid','equivalent_diameter', \
+                'major_axis_length','minor_axis_length','orientation','bbox','perimeter']
+    extra_props = ['circularity']
+
+    u_labeled_data = np.unique(segmented_data)
+    labeled_data = np.searchsorted(u_labeled_data, segmented_data)
+
+    stats = pd.DataFrame(columns=properties)
+
+    for region in measure.regionprops(labeled_data):
+        stats = stats.append({_property: region[_property] for _property in properties}, \
+                                ignore_index=True)
+
+    for prop in extra_props:
+        if prop == 'circularity':
+            stats[prop] = stats.apply(lambda row: 0.0 if row['perimeter'] == 0 \
+                else _calc_circularity(row['area'], row['perimeter']), axis=1)
+
+    print stats
+
+    return stats
+
+def get_ellipse(data):
+    edges = feature.canny(data, sigma=3.0, low_threshold=0.55, high_threshold=0.8)
+    result = hough_ellipse(edges, threshold=4, accuracy=5, min_size=8, max_size=300)
+    result.sort(order='accumulator')
+    return result
+
+def draw_esllipse(data, ellipse):
+    if ellipse:
+        #best = list(ellipse[-1])
+        best = ellipse
+        yc, xc, a, b = [int(round(x)) for x in best[1:5]]
+        orientation = best[5]
+
+        cy, cx = ellipse_perimeter(yc, xc, a, b, orientation)
+        data[cy, cx] = 255
+
+        rr, cc = circle(yc, xc, 2)
+        data[rr, cc] = 255
+    else:
+        return np.zeros(data.shape)
+
+    return data
+
+def get_nearest_ellipse(ellipses_props, gathered_ellipses):
+    if not len(gathered_ellipses):
+        return list(ellipses_props[-1])
+
+    prev_ellipse = gathered_ellipses[-1]
+    nearest_ellipse_to_prev, distance = None, 0
+
+    def get_distance(ellipse, prev_ellipse):
+        return np.abs(prev_ellipse[1] - ellipse[1]) + np.abs(prev_ellipse[2] - ellipse[2])
+
+    for ellipse in ellipses_props:
+        if not nearest_ellipse_to_prev:
+            nearest_ellipse_to_prev = ellipse
+            distance = get_distance(ellipse, prev_ellipse)
+            continue
+
+        new_distance = get_distance(ellipse, prev_ellipse)
+
+        if new_distance <= distance:
+            distance = new_distance
+            nearest_ellipse_to_prev = ellipse
+
+    return nearest_ellipse_to_prev
+
+def segment_guts():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_32bit_150x200x440.raw", dtype='float32', shape=(440,200,150)).copy()
+
+    #ellipse_data = get_ellipse(data[15])
+    #print ellipse_data
+    #new_slice = draw_esllipse(data[15], ellipse_data)
+
+    #fig, (ax1, ax2) = plt.subplots(1, 2)
+
+    #ax1.imshow(new_slice, cmap='gray')
+    #ax2.imshow(data[15], cmap='gray')
+    #plt.show()
+    #return
+
+    # slice_data = preprocess_data(data[12])
+    # seg_data = segment_data(slice_data)
+    # stats = slice_stats(seg_data)
+    #
+    # plt.imshow(seg_data, cmap='gray')
+    # plt.show()
+    # return
+
+
+    fig = plt.figure()
+    im = plt.imshow(data[10], animated=True, cmap='gray')
+
+    gathered_ellipses = []
+
+    def init():
+        im.set_data(np.zeros(data[0].shape))
+        return im,
+
+    def animate(i):
+        plt.title('Frame %d' % i)
+
+        ellipses_props = get_ellipse(data[i])
+
+        nearest_ellipse = get_nearest_ellipse(ellipses_props, gathered_ellipses)
+        print nearest_ellipse
+        gathered_ellipses.append(nearest_ellipse)
+
+        #new_slice = draw_esllipse(data[i], nearest_ellipse)
+
+        #slice_data = preprocess_data(data[i])
+        #seg_data = segment_data(slice_data)
+        #stats = slice_stats(seg_data)
+
+        im.set_data(data[i])
+        return im,
+
+    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=50)
+    #anim.save('basic_animation.mp4', fps=30, extra_args=['-vcodec', 'libx264'])
+    plt.show()
+    #start from the tail
+    #for i,_slice in enumerate(data):
+        #yc, xc, a, b, orientation = get_ellipse(_slice)
+        #new_slice = draw_esllipse(_slice, yc, xc, a, b, orientation)
+
+def test_canny():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    data_slice = data[150]
+
+    sigmas = np.linspace(1,5,5)
+    low_thresholds = np.linspace(0.1,0.55,5)
+
+    thresholds = np.linspace(5,10,5)
+    accuracies = np.linspace(5,25,5)
+
+    edges = feature.canny(data_slice, sigma=3.0, low_threshold=0.4, high_threshold=0.8)
+    ellipses = hough_ellipse(edges, threshold=4, accuracy=1, min_size=15, max_size=300)
+    print ellipses
+    ellipses.sort(order='accumulator')
+    new_slice = draw_esllipse(edges, ellipses)
+    plt.imshow(new_slice, cmap='gray')
+
+
+    #fig, axes = plt.subplots(5, 5)
+
+    #for i,sigma in enumerate(sigmas):
+        #for j,low_threshold in enumerate(low_thresholds):
+    # for i,threshold in enumerate(thresholds):
+    #     for j,accuracy in enumerate(accuracies):
+    #         edges = feature.canny(data_slice, sigma=3.0, low_threshold=0.4, high_threshold=0.8)
+    #         ellipses = hough_ellipse(edges, threshold=threshold, accuracy=accuracy, min_size=15, max_size=300)
+    #         ellipses.sort(order='accumulator')
+    #         new_slice = draw_esllipse(data_slice, ellipses)
+    #
+    #         axes[i,j].imshow(new_slice, cmap='gray')
+    #         #axes[i,j].set_title('sigma=%f, low_th=%f' % (sigma, low_threshold))
+    #         axes[i,j].set_title('threshold=%f, accuracy=%f' % (threshold, accuracy))
+    #         axes[i,j].get_xaxis().set_visible(False)
+    #         axes[i,j].get_yaxis().set_visible(False)
+
+    plt.show()
+
 if __name__ == "__main__":
     #test_data_slice()
-    test_data_slice2()
+    #get_oblique_slice()
+    #plot_obique_slices()
+    #get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84])
+    segment_guts()
+    #test_canny()
