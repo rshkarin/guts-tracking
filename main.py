@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy import ndimage as ndi
 import scipy.ndimage.interpolation as itp
 import scipy.interpolate as interpolate
 from scipy.ndimage import map_coordinates
@@ -7,12 +8,16 @@ from matplotlib import cm
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from mpl_toolkits.mplot3d import Axes3D
+import skimage as ski
 from skimage import measure
 from skimage import filters
 from skimage import feature
-from skimage.transform import hough_ellipse
-from skimage.draw import ellipse_perimeter, circle
-from skimage.morphology import disk
+from skimage.transform import hough_ellipse, hough_circle
+from skimage.draw import circle_perimeter, ellipse_perimeter, circle
+from skimage.morphology import disk, watershed
+
+import profile
+import pstats
 
 def interp3(x, y, z, v, xi, yi, zi, **kwargs):
     """Sample a 3D array "v" with pixel corner locations at "x","y","z" at the
@@ -242,7 +247,7 @@ def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=No
     new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates)
 
     #plot data
-    plot_comparative(data, new_data, slice_idx=slice_idx, phi=phi, theta=theta, psi=psi)
+    #plot_comparative(data, new_data, slice_idx=slice_idx, phi=phi, theta=theta, psi=psi)
 
 def plot_comparative(data, new_data, slice_idx=125, phi=0, theta=0, psi=0):
     fig, axes = plt.subplots(1, 2)
@@ -268,7 +273,8 @@ def preprocess_data(data):
 def segment_data(processed_data):
     th_val = filters.threshold_otsu(processed_data)
     thresholded_parts = processed_data <= th_val
-    return thresholded_parts
+    labeled_data, num_features = ndi.measurements.label(thresholded_parts)
+    return labeled_data, num_features
 
 def slice_stats(segmented_data):
     properties = ['label','area','centroid','equivalent_diameter', \
@@ -289,28 +295,35 @@ def slice_stats(segmented_data):
             stats[prop] = stats.apply(lambda row: 0.0 if row['perimeter'] == 0 \
                 else _calc_circularity(row['area'], row['perimeter']), axis=1)
 
-    print stats
-
     return stats
 
-def get_ellipse(data):
+def get_ellipses(data):
     edges = feature.canny(data, sigma=3.0, low_threshold=0.55, high_threshold=0.8)
-    result = hough_ellipse(edges, threshold=4, accuracy=5, min_size=8, max_size=300)
+    result = hough_ellipse(edges, threshold=4, accuracy=5, min_size=20, max_size=300)
+    result.sort(order='accumulator')
+    return result
+
+def get_circles(data):
+    edges = feature.canny(data, sigma=3.0, low_threshold=0.55, high_threshold=0.8)
+    hough_radii = np.arange(15, 30, 2)
+    result = hough_circle(edges, hough_radii)
     result.sort(order='accumulator')
     return result
 
 def draw_esllipse(data, ellipse):
     if ellipse:
+        image = ski.color.gray2rgb(data)
+
         #best = list(ellipse[-1])
         best = ellipse
         yc, xc, a, b = [int(round(x)) for x in best[1:5]]
         orientation = best[5]
 
         cy, cx = ellipse_perimeter(yc, xc, a, b, orientation)
-        data[cy, cx] = 255
+        image[cy, cx] = (220, 20, 20)
 
         rr, cc = circle(yc, xc, 2)
-        data[rr, cc] = 255
+        data[rr, cc] = (220, 20, 20)
     else:
         return np.zeros(data.shape)
 
@@ -341,9 +354,9 @@ def get_nearest_ellipse(ellipses_props, gathered_ellipses):
     return nearest_ellipse_to_prev
 
 def segment_guts():
-    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_32bit_150x200x440.raw", dtype='float32', shape=(440,200,150)).copy()
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
 
-    #ellipse_data = get_ellipse(data[15])
+    #ellipse_data = get_ellipses(data[15])
     #print ellipse_data
     #new_slice = draw_esllipse(data[15], ellipse_data)
 
@@ -368,34 +381,60 @@ def segment_guts():
 
     gathered_ellipses = []
 
-    def init():
-        im.set_data(np.zeros(data[0].shape))
-        return im,
-
-    def animate(i):
+    for i,_slice in enumerate(data):
         plt.title('Frame %d' % i)
 
-        ellipses_props = get_ellipse(data[i])
+        ellipses_props = get_ellipses(_slice)
 
-        nearest_ellipse = get_nearest_ellipse(ellipses_props, gathered_ellipses)
-        print nearest_ellipse
-        gathered_ellipses.append(nearest_ellipse)
+        new_slice = _slice
 
-        #new_slice = draw_esllipse(data[i], nearest_ellipse)
+        if len(ellipses_props):
+            nearest_ellipse = get_nearest_ellipse(ellipses_props, gathered_ellipses)
+            print nearest_ellipse
+
+            gathered_ellipses.append(nearest_ellipse)
+
+            new_slice = draw_esllipse(_slice, nearest_ellipse)
+
+        im.set_data(new_slice)
+
+        plt.draw()
+
+
+
+    # def init():
+    #     im.set_data(np.zeros(data[0].shape))
+    #     return im,
+    #
+    # def animate(i):
+    #     plt.title('Frame %d' % i)
+    #
+    #     ellipses_props = get_ellipses(data[i])
+    #
+    #     new_slice = data[i]
+    #
+    #     if len(ellipses_props):
+    #         nearest_ellipse = get_nearest_ellipse(ellipses_props, gathered_ellipses)
+    #         print nearest_ellipse
+    #
+    #         gathered_ellipses.append(nearest_ellipse)
+    #
+    #         new_slice = draw_esllipse(data[i], nearest_ellipse)
+    #
+    #     im.set_data(new_slice)
+    #
+    #     return im,
 
         #slice_data = preprocess_data(data[i])
         #seg_data = segment_data(slice_data)
         #stats = slice_stats(seg_data)
 
-        im.set_data(data[i])
-        return im,
-
-    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=50)
+    #anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100)
     #anim.save('basic_animation.mp4', fps=30, extra_args=['-vcodec', 'libx264'])
     plt.show()
     #start from the tail
     #for i,_slice in enumerate(data):
-        #yc, xc, a, b, orientation = get_ellipse(_slice)
+        #yc, xc, a, b, orientation = get_ellipses(_slice)
         #new_slice = draw_esllipse(_slice, yc, xc, a, b, orientation)
 
 def test_canny():
@@ -436,10 +475,182 @@ def test_canny():
 
     plt.show()
 
+def test_circles():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    fig = plt.figure()
+    im = plt.imshow(data[10], animated=True, cmap='gray')
+
+    def init():
+        im.set_data(np.zeros(data[0].shape))
+        return im,
+
+    def animate(i):
+        print 'Frame %d' % i
+        plt.title('Frame %d' % i)
+
+        image = data[i]
+
+        hough_radii = np.arange(10, 100, 10)
+        edges = feature.canny(data[i], sigma=3.0, low_threshold=0.4, high_threshold=0.8)
+        hough_res = hough_circle(edges, hough_radii)
+
+        centers = []
+        accums = []
+        radii = []
+
+        for radius, h in zip(hough_radii, hough_res):
+            peaks = feature.peak_local_max(h)
+            centers.extend(peaks)
+            accums.extend(h[peaks[:, 0], peaks[:, 1]])
+            radii.extend([radius] * len(peaks))
+
+        image = ski.color.gray2rgb(data[i])
+
+        for idx in np.argsort(accums)[::-1][:5]:
+            center_x, center_y = centers[idx]
+            radius = radii[idx]
+            cx, cy = circle_perimeter(center_y, center_x, radius)
+
+            if max(cx) < 150 and max(cy) < 200:
+                image[cy, cx] = (220, 20, 20)
+
+        im.set_data(image)
+
+        return im,
+
+    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100)
+
+    plt.show()
+
+def test_circles2():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    i = 157
+
+    hough_radii = np.arange(10, 100, 10)
+    edges = feature.canny(data[i], sigma=3.0, low_threshold=0.4, high_threshold=0.8)
+    hough_res = hough_circle(edges, hough_radii)
+
+    centers = []
+    accums = []
+    radii = []
+
+    for radius, h in zip(hough_radii, hough_res):
+        peaks = feature.peak_local_max(h)
+        centers.extend(peaks)
+        accums.extend(h[peaks[:, 0], peaks[:, 1]])
+        radii.extend([radius] * len(peaks))
+
+    image = ski.color.gray2rgb(data[i])
+
+    for idx in np.argsort(accums)[::-1][:5]:
+        center_x, center_y = centers[idx]
+        radius = radii[idx]
+        cx, cy = circle_perimeter(center_y, center_x, radius)
+
+        if max(cx) < 150 and max(cy) < 200:
+            image[cy, cx] = (220, 20, 20)
+
+    plt.imshow(image, cmap='gray')
+
+    plt.show()
+
+def test_detect_by_stats():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    data_slice = data[40]
+
+    slice_data = preprocess_data(data_slice)
+    labeled_data, num_features = segment_data(slice_data)
+
+    plt.imshow(labeled_data, cmap='gray')
+    plt.show()
+
+    stats = slice_stats(labeled_data)
+    print stats
+
+    stats = stats[stats.area > 20]
+    stats = stats[stats.circularity > 0.7]
+
+    image = data_slice
+
+    for index, row in stats.iterrows():
+        yc, xc = [int(round(x)) for x in row.centroid]
+        orientation = row.orientation
+        major_axis = int(round(row.major_axis_length/2.))
+        minor_axis = int(round(row.minor_axis_length/2.))
+
+        image = ski.color.gray2rgb(data_slice)
+
+        cy, cx = ellipse_perimeter(yc, xc, minor_axis, major_axis, orientation)
+        image[cy, cx] = (220, 20, 20)
+
+        rr, cc = circle(yc, xc, 2)
+        image[rr, cc] = (220, 20, 20)
+
+    plt.imshow(labeled_data, cmap='gray')
+    plt.imshow(image, cmap='gray')
+    plt.show()
+
+    print stats
+
+def test_detect_by_stats2():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    fig = plt.figure()
+    im = plt.imshow(data[10], animated=True, cmap='gray')
+
+    frame_shape = data[0].shape
+
+    def init():
+        im.set_data(np.zeros(data[0].shape))
+        return im,
+
+    def animate(i):
+        plt.title('Frame %d' % i)
+
+        slice_data = preprocess_data(data[i + 100])
+
+        if np.count_nonzero(slice_data):
+            labeled_data, num_features = segment_data(slice_data)
+
+            stats = slice_stats(labeled_data)
+            stats = stats[(stats.area > 20) & ((stats.major_axis_length < frame_shape[0]) | (stats.major_axis_length < frame_shape[1]))]
+            stats = stats[stats.circularity > 0.5]
+
+            for index, row in stats.iterrows():
+                print 'Frame# %d, Circle# %d [circularity = %f]' % (i, row.label, row.circularity)
+
+                yc, xc = [int(round(x)) for x in row.centroid]
+                orientation = row.orientation
+                major_axis = int(round(row.major_axis_length/2.))
+                minor_axis = int(round(row.minor_axis_length/2.))
+
+                slice_data = ski.color.gray2rgb(slice_data)
+
+                cy, cx = ellipse_perimeter(yc, xc, minor_axis, major_axis, orientation)
+                slice_data[cy, cx] = (220, 20, 20)
+
+                rr, cc = circle(yc, xc, 2)
+                slice_data[rr, cc] = (220, 20, 20)
+
+        im.set_data(slice_data)
+
+        return im,
+
+    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100)
+    plt.show()
+
 if __name__ == "__main__":
     #test_data_slice()
     #get_oblique_slice()
     #plot_obique_slices()
-    #get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84])
-    segment_guts()
+    #profile.run('get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84]); print')
+    get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84])
+    #segment_guts()
     #test_canny()
+    #test_circles()
+    #test_circles2()
+    #test_detect_by_stats()
+    #test_detect_by_stats2()
