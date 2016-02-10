@@ -18,7 +18,22 @@ from skimage.morphology import disk, watershed
 
 import profile
 import pstats
+import time
+from functools import wraps
 
+def fn_timer(function):
+    @wraps(function)
+    def function_timer(*args, **kwargs):
+        t0 = time.time()
+        result = function(*args, **kwargs)
+        t1 = time.time()
+        print ("Total time running %s: %s seconds" %
+               (function.func_name, str(t1-t0))
+               )
+        return result
+    return function_timer
+
+@fn_timer
 def interp3(x, y, z, v, xi, yi, zi, **kwargs):
     """Sample a 3D array "v" with pixel corner locations at "x","y","z" at the
     points in "xi", "yi", "zi" using linear interpolation. Additional kwargs
@@ -191,6 +206,7 @@ def plot_obique_slices():
 
     plt.show()
 
+@fn_timer
 def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=None):
     data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
     #plt.imshow(data[slice_idx], cmap='gray')
