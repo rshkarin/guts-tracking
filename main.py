@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
+from scipy.spatial import distance
 import scipy.ndimage.interpolation as itp
 import scipy.interpolate as interpolate
 from scipy.ndimage import map_coordinates
@@ -52,7 +53,7 @@ def interp3(x, y, z, v, xi, yi, zi, **kwargs):
     output = np.empty(xi.shape, dtype=float)
     coords = [index_coords(*item) for item in zip([x, y, z], [xi, yi, zi])]
 
-    map_coordinates(v, coords, order=1, output=output, **kwargs)
+    map_coordinates(v, coords, output=output, **kwargs)
 
     return output.reshape(orig_shape)
 
@@ -207,7 +208,7 @@ def plot_obique_slices():
     plt.show()
 
 @fn_timer
-def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=None):
+def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=None, order=1):
     data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
     #plt.imshow(data[slice_idx], cmap='gray')
     #plt.show()
@@ -260,10 +261,10 @@ def get_guts_oblique_slice(phi_z=0, theta_y=0, psi_x=0, slice_idx=125, rot_p0=No
     x_coordinates = np.reshape(coordinates_axes_old[2,:], dims)
 
     #get the values for your new coordinates
-    new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates)
+    new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates, order=order)
 
     #plot data
-    #plot_comparative(data, new_data, slice_idx=slice_idx, phi=phi, theta=theta, psi=psi)
+    plot_comparative(data, new_data, slice_idx=slice_idx, phi=phi, theta=theta, psi=psi)
 
 def plot_comparative(data, new_data, slice_idx=125, phi=0, theta=0, psi=0):
     fig, axes = plt.subplots(1, 2)
@@ -292,10 +293,10 @@ def segment_data(processed_data):
     labeled_data, num_features = ndi.measurements.label(thresholded_parts)
     return labeled_data, num_features
 
-def slice_stats(segmented_data):
+def slice_stats(segmented_data, slice_idx=-1):
     properties = ['label','area','centroid','equivalent_diameter', \
                 'major_axis_length','minor_axis_length','orientation','bbox','perimeter']
-    extra_props = ['circularity']
+    extra_props = ['circularity','slice_idx']
 
     u_labeled_data = np.unique(segmented_data)
     labeled_data = np.searchsorted(u_labeled_data, segmented_data)
@@ -310,6 +311,9 @@ def slice_stats(segmented_data):
         if prop == 'circularity':
             stats[prop] = stats.apply(lambda row: 0.0 if row['perimeter'] == 0 \
                 else _calc_circularity(row['area'], row['perimeter']), axis=1)
+
+        if prop == 'slice_idx':
+            stats[prop] = slice_idx
 
     return stats
 
@@ -326,46 +330,98 @@ def get_circles(data):
     result.sort(order='accumulator')
     return result
 
-def draw_esllipse(data, ellipse):
-    if ellipse:
-        image = ski.color.gray2rgb(data)
+# def draw_esllipse(data, ellipse):
+#     if ellipse:
+#         image = ski.color.gray2rgb(data)
+#
+#         #best = list(ellipse[-1])
+#         best = ellipse
+#         yc, xc, a, b = [int(round(x)) for x in best[1:5]]
+#         orientation = best[5]
+#
+#         cy, cx = ellipse_perimeter(yc, xc, a, b, orientation)
+#         image[cy, cx] = (220, 20, 20)
+#
+#         rr, cc = circle(yc, xc, 2)
+#         data[rr, cc] = (220, 20, 20)
+#     else:
+#         return np.zeros(data.shape)
+#
+#     return data
 
-        #best = list(ellipse[-1])
-        best = ellipse
-        yc, xc, a, b = [int(round(x)) for x in best[1:5]]
-        orientation = best[5]
+# def get_nearest_ellipse(ellipses_props, gathered_ellipses):
+#     if not len(gathered_ellipses):
+#         return list(ellipses_props[-1])
+#
+#     prev_ellipse = gathered_ellipses[-1]
+#     nearest_ellipse_to_prev, distance = None, 0
+#
+#     def get_distance(ellipse, prev_ellipse):
+#         return np.abs(prev_ellipse[1] - ellipse[1]) + np.abs(prev_ellipse[2] - ellipse[2])
+#
+#     for ellipse in ellipses_props:
+#         if not nearest_ellipse_to_prev:
+#             nearest_ellipse_to_prev = ellipse
+#             distance = get_distance(ellipse, prev_ellipse)
+#             continue
+#
+#         new_distance = get_distance(ellipse, prev_ellipse)
+#
+#         if new_distance <= distance:
+#             distance = new_distance
+#             nearest_ellipse_to_prev = ellipse
+#
+#     return nearest_ellipse_to_prev
 
-        cy, cx = ellipse_perimeter(yc, xc, a, b, orientation)
-        image[cy, cx] = (220, 20, 20)
+def get_init_ellipses(data):
+    stats = pd.DataFrame()
 
-        rr, cc = circle(yc, xc, 2)
-        data[rr, cc] = (220, 20, 20)
-    else:
-        return np.zeros(data.shape)
+    for idx,_slice in enumerate(data):
+        if np.count_nonzero(_slice):
+            #segemnt frame
+            labeled_data, num_labels = segment_data(_slice)
 
-    return data
+            #remove all big and non-circualr labels
+            stats = slice_stats(labeled_data, slice_idx=idx)
+            stats = stats[(stats.area > 20) & ((stats.major_axis_length < _slice.shape[0]) | (stats.major_axis_length < _slice.shape[1]))]
+            stats = stats[stats.circularity > 0.5]
 
-def get_nearest_ellipse(ellipses_props, gathered_ellipses):
-    if not len(gathered_ellipses):
-        return list(ellipses_props[-1])
+            if not stats.size:
+                continue
 
-    prev_ellipse = gathered_ellipses[-1]
-    nearest_ellipse_to_prev, distance = None, 0
+            break
+
+    return stats
+
+def get_nearest_ellipse(ellipses_stats, gathered_ellipses, tolerance=50.0):
+    if not gathered_ellipses.size:
+        raise ValueError('There are no initial ellipses.')
+
+    if not ellipses_stats.size:
+        raise ValueError('There are no detected ellipses.')
 
     def get_distance(ellipse, prev_ellipse):
-        return np.abs(prev_ellipse[1] - ellipse[1]) + np.abs(prev_ellipse[2] - ellipse[2])
+        return np.hypot(ellipse.centroid[0] - prev_ellipse.centroid[0], \
+                        ellipse.centroid[1] - prev_ellipse.centroid[1])
 
-    for ellipse in ellipses_props:
-        if not nearest_ellipse_to_prev:
+    #get last ellipse
+    prev_ellipse = gathered_ellipses.iloc[-1]
+    nearest_ellipse_to_prev, dist = pd.Series(), 0
+
+    for index, ellipse in ellipses_stats.iterrows():
+        if nearest_ellipse_to_prev.empty:
             nearest_ellipse_to_prev = ellipse
-            distance = get_distance(ellipse, prev_ellipse)
+            dist = get_distance(ellipse, prev_ellipse)
             continue
 
-        new_distance = get_distance(ellipse, prev_ellipse)
+        new_dist = get_distance(ellipse, prev_ellipse)
 
-        if new_distance <= distance:
-            distance = new_distance
+        if new_dist <= dist:
+            dist = new_dist
             nearest_ellipse_to_prev = ellipse
+
+    if get_distance(ellipse, prev_ellipse) > tolerance:
+        raise ValueError('The detected ellipse is too far away.')
 
     return nearest_ellipse_to_prev
 
@@ -575,37 +631,39 @@ def test_circles2():
 def test_detect_by_stats():
     data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
 
-    data_slice = data[40]
+    data_slice = data[68]
 
     slice_data = preprocess_data(data_slice)
     labeled_data, num_features = segment_data(slice_data)
 
-    plt.imshow(labeled_data, cmap='gray')
-    plt.show()
+    #plt.imshow(labeled_data == 4, cmap='gray')
+    #plt.show()
 
     stats = slice_stats(labeled_data)
-    print stats
 
-    stats = stats[stats.area > 20]
-    stats = stats[stats.circularity > 0.7]
+    #stats = stats[(stats.area > 20) & (stats.area < np.pi * min(data_slice.shape)**2)]
+    #stats = stats[(stats.area > 20) & (stats.area < 20000)]
+    stats = stats[(stats.area > 2) & (stats.area < 20000)]
+    #print stats
+    #stats = stats[stats.circularity > 0.2]
 
     image = data_slice
 
     for index, row in stats.iterrows():
+        print row
         yc, xc = [int(round(x)) for x in row.centroid]
         orientation = row.orientation
         major_axis = int(round(row.major_axis_length/2.))
         minor_axis = int(round(row.minor_axis_length/2.))
 
-        image = ski.color.gray2rgb(data_slice)
+        image = ski.color.gray2rgb(image)
 
-        cy, cx = ellipse_perimeter(yc, xc, minor_axis, major_axis, orientation)
+        cy, cx = ellipse_perimeter(yc, xc, minor_axis, major_axis, -orientation)
         image[cy, cx] = (220, 20, 20)
 
         rr, cc = circle(yc, xc, 2)
         image[rr, cc] = (220, 20, 20)
 
-    plt.imshow(labeled_data, cmap='gray')
     plt.imshow(image, cmap='gray')
     plt.show()
 
@@ -658,15 +716,91 @@ def test_detect_by_stats2():
     anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100)
     plt.show()
 
+def draw_ellipses(slice_data, ellipse, color=(220, 20, 20)):
+    yc, xc = [int(round(x)) for x in ellipse.centroid]
+    orientation = ellipse.orientation
+    major_axis = int(round(ellipse.major_axis_length/2.))
+    minor_axis = int(round(ellipse.minor_axis_length/2.))
+
+    image = ski.color.gray2rgb(slice_data)
+
+    cy, cx = ellipse_perimeter(yc, xc, minor_axis, major_axis, -orientation)
+    image[cy, cx] = color
+
+    rr, cc = circle(yc, xc, 2)
+    image[rr, cc] = color
+
+    return image
+
+def track_guts(data, inital_ellipse):
+    fig = plt.figure()
+    im = plt.imshow(data[inital_ellipse.slice_idx], animated=True, cmap='gray')
+
+    frame_shape = data[inital_ellipse.slice_idx].shape
+
+    gathered_ellipses = pd.DataFrame()
+    gathered_ellipses = gathered_ellipses.append(inital_ellipse, ignore_index=True)
+
+    print gathered_ellipses.shape
+
+    def init():
+        im.set_data(np.zeros(data[inital_ellipse.slice_idx].shape))
+        return im,
+
+    def animate(i, **kwargs):
+        gathered_ellipses = kwargs['gathered_ellipses']
+        index = i + inital_ellipse.slice_idx + 1
+
+        plt.title('Frame %d' % index)
+
+        slice_data = preprocess_data(data[index])
+
+        print 'FRAME #%d' % index
+
+        if np.count_nonzero(slice_data):
+            #segemnt frame
+            labeled_data, num_features = segment_data(slice_data)
+
+            #remove all big and non-circualr labels
+            stats = slice_stats(labeled_data, slice_idx=i)
+            stats = stats[(stats.area > 20) & ((stats.major_axis_length < frame_shape[0]) | (stats.major_axis_length < frame_shape[1]))]
+            #stats = stats[stats.area > 50]
+            stats = stats[stats.circularity > 0.5]
+
+            if stats.size:
+                #find the nearest ellipse and collect
+                nearest_ellipse = get_nearest_ellipse(stats, gathered_ellipses)
+                gathered_ellipses = gathered_ellipses.append(nearest_ellipse, ignore_index=True)
+
+                #draw ellipse
+                slice_data = draw_ellipses(slice_data, nearest_ellipse)
+
+        im.set_data(slice_data)
+
+        return im,
+
+    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100, fargs={gathered_ellipses: gathered_ellipses})
+    plt.show()
+
+def segment_guts_v2():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    initial_ellipses = get_init_ellipses(data)
+
+    for index, ellipse in initial_ellipses.iterrows():
+        print '---Track guts from slice# %d at point %s' % (ellipse.slice_idx, str(ellipse.centroid))
+        track_guts(data, ellipse)
+
 if __name__ == "__main__":
     #test_data_slice()
     #get_oblique_slice()
     #plot_obique_slices()
     #profile.run('get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84]); print')
-    get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84])
+    #get_guts_oblique_slice(theta_y=16, psi_x=7, slice_idx=283, rot_p0=[289, 109, 84])
     #segment_guts()
     #test_canny()
     #test_circles()
     #test_circles2()
     #test_detect_by_stats()
     #test_detect_by_stats2()
+    segment_guts_v2()
