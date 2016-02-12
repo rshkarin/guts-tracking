@@ -373,6 +373,57 @@ def get_circles(data):
 #
 #     return nearest_ellipse_to_prev
 
+def rotate_volume(data, angles, order=3):
+    phi, theta, psi = angles
+
+    r = np.radians([phi, theta, psi])
+    dims = data.shape
+
+    rot_p0 = [round(dims[0]/2.), round(dims[1]/2.), round(dims[2]/2.)]
+
+    p0 = np.matrix(rot_p0).T #image center
+
+    Rz = np.matrix([[1., 0., 0., 0.], \
+                   [0., np.cos(r[0]), np.sin(r[0]), 0.], \
+                   [0., -np.sin(r[0]), np.cos(r[0]), 0.], \
+                   [0., 0., 0., 1.]])
+
+    Ry = np.matrix([[np.cos(r[1]), 0., -np.sin(r[1]), 0.], \
+                   [0., 1., 0., 0.], \
+                   [np.sin(r[1]), 0., np.cos(r[1]), 0.], \
+                   [0., 0., 0., 1.]])
+    Rx = np.matrix([[np.cos(r[2]), np.sin(r[2]), 0., 0.], \
+                   [-np.sin(r[2]), np.cos(r[2]), 0., 0.], \
+                   [0., 0., 1., 0.], \
+                   [0., 0., 0., 1.]])
+    R = Rz*Ry*Rx
+
+    #make affine matrix to rotate about center of image instead of origin
+    T = (np.identity(3) - R[0:3,0:3]) * p0[0:3]
+    A = R
+    A[0:3,3] = T
+
+    rot_old_to_new = A
+    rot_new_to_old = rot_old_to_new.I
+
+    #this is the transformation
+    #I assume you want a volume with the same dimensions as your old volume
+    zv, yv, xv = np.meshgrid(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), indexing='ij')
+
+    #the coordinates you want to find a value for
+    coordinates_axes_new = np.array([np.ravel(zv).T, np.ravel(yv).T, np.ravel(xv).T, np.ones(len(np.ravel(zv))).T])
+
+    #the coordinates where you can find those values
+    coordinates_axes_old = np.array(rot_new_to_old * coordinates_axes_new)
+    z_coordinates = np.reshape(coordinates_axes_old[0,:], dims)
+    y_coordinates = np.reshape(coordinates_axes_old[1,:], dims)
+    x_coordinates = np.reshape(coordinates_axes_old[2,:], dims)
+
+    #get the values for your new coordinates
+    new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates, order=order)
+
+    return new_data
+
 def get_init_ellipses(data):
     stats = pd.DataFrame()
 
@@ -421,9 +472,133 @@ def get_nearest_ellipse(ellipses_stats, gathered_ellipses, tolerance=50.0):
             nearest_ellipse_to_prev = ellipse
 
     if get_distance(ellipse, prev_ellipse) > tolerance:
-        raise ValueError('The detected ellipse is too far away.')
+        #raise ValueError('The detected ellipse is too far away.')
+        print 'The detected ellipse is too far away.'
+        return pd.Series(), 1e10
 
-    return nearest_ellipse_to_prev
+    return nearest_ellipse_to_prev, dist
+
+
+def get_arbitrary_slice(data, slice_idx, phi_z=0, theta_y=0, psi_x=0, rot_p0=None, order=1):
+    phi, theta, psi = phi_z, theta_y, psi_x
+
+    r = np.radians([phi, theta, psi])
+    dims = data.shape
+
+    if not rot_p0.any():
+        rot_p0 = [round(dims[0]/2.), round(dims[1]/2.), round(dims[2]/2.)]
+
+    p0 = np.matrix(rot_p0).T #image center
+
+    Rz = np.matrix([[1., 0., 0., 0.], \
+                   [0., np.cos(r[0]), np.sin(r[0]), 0.], \
+                   [0., -np.sin(r[0]), np.cos(r[0]), 0.], \
+                   [0., 0., 0., 1.]])
+
+    Ry = np.matrix([[np.cos(r[1]), 0., -np.sin(r[1]), 0.], \
+                   [0., 1., 0., 0.], \
+                   [np.sin(r[1]), 0., np.cos(r[1]), 0.], \
+                   [0., 0., 0., 1.]])
+    Rx = np.matrix([[np.cos(r[2]), np.sin(r[2]), 0., 0.], \
+                   [-np.sin(r[2]), np.cos(r[2]), 0., 0.], \
+                   [0., 0., 1., 0.], \
+                   [0., 0., 0., 1.]])
+    R = Rz*Ry*Rx
+
+    #make affine matrix to rotate about center of image instead of origin
+    T = (np.identity(3) - R[0:3,0:3]) * p0[0:3]
+    A = R
+    A[0:3,3] = T
+
+    rot_old_to_new = A
+    rot_new_to_old = rot_old_to_new.I
+
+    #this is the transformation
+    #I assume you want a volume with the same dimensions as your old volume
+    zv, yv, xv = np.meshgrid(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), indexing='ij')
+
+    #the coordinates you want to find a value for
+    coordinates_axes_new = np.array([np.ravel(zv).T, np.ravel(yv).T, np.ravel(xv).T, np.ones(len(np.ravel(zv))).T])
+
+    #the coordinates where you can find those values
+    coordinates_axes_old = np.array(rot_new_to_old * coordinates_axes_new)
+    z_coordinates = np.reshape(coordinates_axes_old[0,:], dims)
+    y_coordinates = np.reshape(coordinates_axes_old[1,:], dims)
+    x_coordinates = np.reshape(coordinates_axes_old[2,:], dims)
+
+    #get the values for your new coordinates
+    new_data = interp3(np.arange(dims[0]), np.arange(dims[1]), np.arange(dims[2]), data, z_coordinates, y_coordinates, x_coordinates, order=order)
+
+    return new_data[slice_idx]
+
+
+
+def predict_ellipse(data, gathered_ellipses, slice_idx):
+    prev_ellipse = gathered_ellipses.iloc[-1]
+
+    #rotation point
+    rot_point = np.array([prev_ellipse.slice_idx, prev_ellipse.centroid[1], prev_ellipse.centroid[0]])
+
+    #directions
+    x_angles, y_angles, z_angles = np.linspace(-15,15,3), np.linspace(-15,15,3), np.linspace(-15,15,3)
+
+    #storage of candidates
+    res_shape = tuple([len(x_angles), len(y_angles), len(z_angles)])
+    slice_shape = data[0].shape
+
+    results_ellipses = np.empty(len(x_angles) * len(y_angles) * len(z_angles), dtype=object)
+    results_distances = np.empty(len(x_angles) * len(y_angles) * len(z_angles))
+    results_slices = np.zeros((len(x_angles) * len(y_angles) * len(z_angles), slice_shape[0], slice_shape[1]))
+
+    results_ellipses.fill(np.nan)
+    results_distances.fill(10e9)
+
+    results_ellipses = results_ellipses.reshape(res_shape)
+    results_distances = results_distances.reshape(res_shape)
+
+    def ravel_index(x, dims):
+        i = 0
+        for dim, j in zip(dims, x):
+            i *= dim
+            i += j
+        return i
+
+    for i,x_deg in enumerate(x_angles):
+        for j,y_deg in enumerate(y_angles):
+            for k,z_deg in enumerate(z_angles):
+                oblique_slice = get_arbitrary_slice(data, slice_idx=slice_idx, phi_z=z_deg, \
+                                    theta_y=y_deg, psi_x=x_deg, rot_p0=rot_point)
+
+                slice_data = preprocess_data(oblique_slice)
+
+                if np.count_nonzero(slice_data):
+                    labeled_data, num_features = segment_data(slice_data)
+
+                    stats = slice_stats(labeled_data, slice_idx=slice_idx)
+                    stats = stats[(stats.area > 20) & ((stats.major_axis_length < slice_data.shape[0]) | (stats.major_axis_length < slice_data.shape[1]))]
+                    stats = stats[stats.circularity > 0.4]
+
+                    if stats.size:
+                        nearest_ellipse, distance = get_nearest_ellipse(stats, gathered_ellipses)
+
+                        print nearest_ellipse
+
+                        results_ellipses[i,j,k] = nearest_ellipse
+                        results_distances[i,j,k] = distance
+                        results_slices[ravel_index((k, j, i), res_shape)] = oblique_slice
+
+    results_ellipses = results_ellipses.ravel()
+    results_distances = results_distances.ravel()
+
+    print 'Distances and ellipses:'
+    print results_distances
+    print results_ellipses
+
+    min_dist_idx = results_distances.argmin(axis=0)
+    nearest_ellipse = results_ellipses[min_dist_idx]
+    output_slice = results_slices[min_dist_idx]
+
+    return nearest_ellipse, output_slice
 
 def segment_guts():
     data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
@@ -732,23 +907,25 @@ def draw_ellipses(slice_data, ellipse, color=(220, 20, 20)):
 
     return image
 
-def track_guts(data, inital_ellipse):
+def track_guts_animation(data, inital_ellipse):
     fig = plt.figure()
     im = plt.imshow(data[inital_ellipse.slice_idx], animated=True, cmap='gray')
 
     frame_shape = data[inital_ellipse.slice_idx].shape
 
-    gathered_ellipses = pd.DataFrame()
-    gathered_ellipses = gathered_ellipses.append(inital_ellipse, ignore_index=True)
-
-    print gathered_ellipses.shape
+    global gathered_ellipses
 
     def init():
+        global gathered_ellipses
+        gathered_ellipses = pd.DataFrame()
+        gathered_ellipses = gathered_ellipses.append(inital_ellipse, ignore_index=True)
+
         im.set_data(np.zeros(data[inital_ellipse.slice_idx].shape))
         return im,
 
-    def animate(i, **kwargs):
-        gathered_ellipses = kwargs['gathered_ellipses']
+    def animate(i):
+        global gathered_ellipses
+
         index = i + inital_ellipse.slice_idx + 1
 
         plt.title('Frame %d' % index)
@@ -762,15 +939,21 @@ def track_guts(data, inital_ellipse):
             labeled_data, num_features = segment_data(slice_data)
 
             #remove all big and non-circualr labels
-            stats = slice_stats(labeled_data, slice_idx=i)
+            stats = slice_stats(labeled_data, slice_idx=index)
             stats = stats[(stats.area > 20) & ((stats.major_axis_length < frame_shape[0]) | (stats.major_axis_length < frame_shape[1]))]
-            #stats = stats[stats.area > 50]
-            stats = stats[stats.circularity > 0.5]
+            #stats = stats[stats.area > 20]
+
+            #stats = stats[stats.circularity > 0.5]
 
             if stats.size:
                 #find the nearest ellipse and collect
-                nearest_ellipse = get_nearest_ellipse(stats, gathered_ellipses)
+                nearest_ellipse, distance = get_nearest_ellipse(stats, gathered_ellipses)
+
+                if nearest_ellipse.empty:
+                    nearest_ellipse, slice_data = predict_ellipse(data, gathered_ellipses, index)
+
                 gathered_ellipses = gathered_ellipses.append(nearest_ellipse, ignore_index=True)
+                print nearest_ellipse.centroid
 
                 #draw ellipse
                 slice_data = draw_ellipses(slice_data, nearest_ellipse)
@@ -779,8 +962,52 @@ def track_guts(data, inital_ellipse):
 
         return im,
 
-    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=100, interval=100, fargs={gathered_ellipses: gathered_ellipses})
+    anim = animation.FuncAnimation(fig, animate, init_func=init, frames=300, interval=100, repeat=False)
     plt.show()
+
+    print gathered_ellipses[['centroid','slice_idx']]
+
+def track_guts_noa(data, inital_ellipse):
+    fig = plt.figure()
+    ax = fig.gca()
+    plt.ion()
+    plt.show()
+
+    frame_shape = data[inital_ellipse.slice_idx].shape
+
+    gathered_ellipses = pd.DataFrame()
+    gathered_ellipses = gathered_ellipses.append(inital_ellipse, ignore_index=True)
+
+    for slice_idx in np.arange(inital_ellipse.slice_idx + 1, 200):
+        plt.title('Frame %d' % slice_idx)
+        print 'FRAME #%d' % slice_idx
+
+        slice_data = preprocess_data(data[slice_idx])
+
+        if np.count_nonzero(slice_data):
+            #segemnt frame
+            labeled_data, num_features = segment_data(slice_data)
+
+            #remove all big and non-circualr labels
+            stats = slice_stats(labeled_data, slice_idx=slice_idx)
+            stats = stats[(stats.area > 20) & ((stats.major_axis_length < frame_shape[0]) | (stats.major_axis_length < frame_shape[1]))]
+
+            if stats.size:
+                #find the nearest ellipse and collect
+                nearest_ellipse, distance = get_nearest_ellipse(stats, gathered_ellipses)
+
+                if nearest_ellipse.empty:
+                    nearest_ellipse, slice_data = predict_ellipse(data, gathered_ellipses, slice_idx)
+                    print 'Found ellipse:'
+                    print nearest_ellipse
+
+                gathered_ellipses = gathered_ellipses.append(nearest_ellipse, ignore_index=True)
+
+                #draw ellipse
+                slice_data = draw_ellipses(slice_data, nearest_ellipse)
+        if slice_idx > 150:
+            ax.imshow(slice_data, cmap='gray')
+            plt.draw()
 
 def segment_guts_v2():
     data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
@@ -789,9 +1016,184 @@ def segment_guts_v2():
 
     for index, ellipse in initial_ellipses.iterrows():
         print '---Track guts from slice# %d at point %s' % (ellipse.slice_idx, str(ellipse.centroid))
-        track_guts(data, ellipse)
+        #track_guts_animation(data, ellipse)
+        track_guts_noa(data, ellipse)
+
+def collect_stats(segmented_data, slice_idx=-1):
+    properties = ['label','area','centroid','equivalent_diameter', \
+                    'major_axis_length','minor_axis_length','orientation','bbox','perimeter']
+    extra_props = ['circularity','slice_idx']
+
+    u_labeled_data = np.unique(segmented_data)
+    labeled_data = np.searchsorted(u_labeled_data, segmented_data)
+
+    stats = pd.DataFrame(columns=properties)
+
+    for region in measure.regionprops(labeled_data):
+        stats = stats.append({_property: region[_property] for _property in properties}, \
+                                ignore_index=True)
+
+    for prop in extra_props:
+        if prop == 'circularity':
+            stats[prop] = stats.apply(lambda row: 0.0 if row['perimeter'] == 0 \
+                else _calc_circularity(row['area'], row['perimeter']), axis=1)
+
+        if prop == 'slice_idx':
+            stats[prop] = slice_idx
+
+    return stats
+
+# def collect_circles(data):
+#     frame_shape = data[0].shape
+#
+#     stats_z, stats_y, stats_x = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+#
+#     for dim in data.shape:
+#         slice_data = None
+#         for slice_idx in np.arange(dim):
+#             if dim == 0:
+#                 slice_data = preprocess_data(data[slice_idx,:,:])
+#             elif dim == 1:
+#                 slice_data = preprocess_data(data[:,slice_idx,:])
+#             elif dim == 2:
+#                 slice_data = preprocess_data(data[:,:,slice_idx])
+#             else:
+#                 raise ValueError('Incorrect dimension of slicing.')
+#
+#             if np.count_nonzero(slice_data):
+#                 #segemnt frame
+#                 labeled_data, num_features = segment_data(slice_data)
+#
+#                 #remove all big and non-circualr labels
+#                 stats = collect_stats(labeled_data, slice_idx=slice_idx)
+#                 stats = stats[(stats.area > 20) & ((stats.major_axis_length < frame_shape[0]) | (stats.major_axis_length < frame_shape[1]))]
+#                 stats = stats[stats.circularity > 0.6]
+#
+#                 if dim == 0:
+#                     stats_z = stats_z.append(stats, ignore_index=True)
+#                 elif dim == 1:
+#                     stats_y = stats_y.append(stats, ignore_index=True)
+#                 elif dim == 2:
+#                     stats_x = stats_x.append(stats, ignore_index=True)
+#                 else:
+#                     raise ValueError('Incorrect dimension of stats.')
+#
+#     return stats_z, stats_y, stats_x
+
+def collect_circles(data, dim=0):
+    frame_size = min(data.shape)
+
+    collected_stats = pd.DataFrame()
+    slice_data = None
+
+    for slice_idx in np.arange(data.shape[dim]):
+        if dim == 0:
+            slice_data = preprocess_data(data[slice_idx,:,:])
+        elif dim == 1:
+            slice_data = preprocess_data(data[:,slice_idx,:])
+        elif dim == 2:
+            slice_data = preprocess_data(data[:,:,slice_idx])
+        else:
+            raise ValueError('Incorrect dimension of slicing.')
+
+        if np.count_nonzero(slice_data):
+            #segemnt frame
+            labeled_data, num_features = segment_data(slice_data)
+
+            #remove all big and non-circualr labels
+            stats = collect_stats(labeled_data, slice_idx=slice_idx)
+            stats = stats[(stats.area > 50) & (stats.major_axis_length < frame_size)]
+            stats = stats[stats.circularity > 0.8]
+            collected_stats = collected_stats.append(stats, ignore_index=True)
+
+    return collected_stats
+
+def create_volume(circle_stats, output_shape, dim=0):
+    volume = np.zeros(output_shape)
+
+    for index, circle in circle_stats.iterrows():
+        if dim == 0:
+            volume[circle.slice_idx, circle.centroid[0], circle.centroid[1]] = 1
+        elif dim == 1:
+            volume[circle.centroid[0], circle.slice_idx, circle.centroid[1]] = 1
+        elif dim == 2:
+            volume[circle.centroid[0], circle.centroid[1], circle.slice_idx] = 1
+
+    return volume
+
+def produce_volume_points(data, dim=0):
+    stats = collect_circles(data, dim=dim)
+    transformed_volume = create_volume(stats, data.shape, dim=dim)
+
+    return transformed_volume
+
+def get_points(data):
+    points = []
+
+    for z in np.arange(data.shape[0]):
+        for y in np.arange(data.shape[1]):
+            for x in np.arange(data.shape[2]):
+                if data[z,y,x] != 0:
+                    points.append([z,y,x])
+
+    return np.array(points)
+
+def segment_guts_multiprojections():
+    data = np.memmap("E:\\guts_tracking\\data\\fish202_aligned_masked_8bit_150x200x440.raw", dtype='uint8', shape=(440,200,150)).copy()
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    #(z,y,x)
+    angles = np.array([[0,0,0], [45,0,0], [90,0,0], [135,0,0], [0,0,45], [0,0,90], [0,0,135],\
+              [0,0,160], [0,45,0], [0,90,0], [0,135,0], [0,160,0]])
+
+    collected_vol_points = np.zeros(data.shape, dtype=np.int)
+
+    for angle_set in angles:
+        print 'Angles %s' % str(angle_set)
+        rotated = data
+        if any(angle_set):
+            rotated = rotate_volume(data, angle_set, order=3)
+
+        for dim in range(len(data.shape)):
+            print 'Dim %d' % dim
+            rotated_vol = produce_volume_points(rotated, dim=dim)
+
+            if any(angle_set):
+                rotated_vol = rotate_volume(rotated_vol, -angle_set, order=3)
+
+            collected_vol_points = np.logical_or(collected_vol_points, rotated_vol).astype(np.int)
+
+    print 'Obtaining points...'
+    points = get_points(collected_vol_points)
+
+    ax.scatter(points[:,2], points[:,0], points[:,1], c='r', marker='o')
+    plt.show()
+
+
+    #plot_comparative(data, rotated_inv, slice_idx=round(data.shape[0]/2.), phi=0, theta=-45, psi=-22)
+    #plt.imshow(rotated[100], cmap='gray')
+    #plt.show()
+
+def test3d():
+    mu, sigma = 0, 0.1
+    x = 10*np.random.normal(mu, sigma, 5000)
+    y = 10*np.random.normal(mu, sigma, 5000)
+    z = 10*np.random.normal(mu, sigma, 5000)
+
+    xyz = np.vstack([x,y,z])
+    kde = stats.gaussian_kde(xyz)
+    density = kde(xyz)
+
+    # Plot scatter with mayavi
+    figure = mlab.figure('DensityPlot')
+    pts = mlab.points3d(x, y, z, density, scale_mode='none', scale_factor=0.07)
+    mlab.show()
+
 
 if __name__ == "__main__":
+    #test3d()
     #test_data_slice()
     #get_oblique_slice()
     #plot_obique_slices()
@@ -803,4 +1205,5 @@ if __name__ == "__main__":
     #test_circles2()
     #test_detect_by_stats()
     #test_detect_by_stats2()
-    segment_guts_v2()
+    #segment_guts_v2()
+    segment_guts_multiprojections()
